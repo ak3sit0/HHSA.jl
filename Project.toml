@@ -1,0 +1,13 @@
+name = "HHSA"
+uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+version = "0.1.0"
+authors = ["HHSA_Julia"]
+
+[deps]
+DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+
+[compat]
+DSP = "0.8.4"
+Plots = "1.41.6"
+julia = "1.6"
