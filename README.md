@@ -1,5 +1,8 @@
 # HHSA.jl — Holo-Hilbert Spectral Analysis
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Julia Version](https://img.shields.io/badge/Julia-%E2%89%A5%201.6-purple.svg)](https://julialang.org/)
+
 **Why you need this:** Fourier analysis cannot detect *multiplicative* interactions in signals. When a slow modulation *multiplies* a carrier (not adds), classical spectrograms show only noise. **HHSA reveals the hidden modulation.**
 
 ## The Problem: Fourier Fails on Multiplicative Signals
@@ -194,9 +197,6 @@ Compute the binned 2-D energy matrix directly (without plotting).
 - Rilling, G., Flandrin, P., & Gonçalves, P. (2003).
   *On empirical mode decomposition and its algorithms.* 
   IEEE-EURASIP Workshop on Nonlinear Signal and Image Processing (NSIP-03).
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Julia Version](https://img.shields.io/badge/Julia-%E2%89%A5%201.6-purple.svg)](https://julialang.org/)
 
 ## Contact
 
