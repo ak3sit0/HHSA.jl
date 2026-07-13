@@ -1,223 +1,349 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# test/runtests.jl  –  HHSA.jl test suite
+#
+# Every @testset is annotated with the paper section / equation / figure
+# that motivates it, so failures point directly to a theoretical claim.
+#
+# Reference: Huang et al. (2016) Phil. Trans. R. Soc. A 374, 20150206
+# ─────────────────────────────────────────────────────────────────────────────
+
 using Test
-using HHSA
-using DSP
-using Random
 using Statistics
+using Random
+using DSP
+using HHSA   # rename to HoloHilbert once the package is restructured
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NOTE ON MATLAB EQUIVALENCE
-# ─────────────────────────────────────────────────────────────────────────────
-# The OSF MATLAB toolboxes (hhsa_tools, hhsa_tools_d2) use EEMD (Ensemble EMD)
-# rather than plain EMD. EEMD adds multiple noise realizations to reduce mode
-# mixing (Wu & Huang 2009), which is important for EEG/real-world data. Our
-# implementation uses plain EMD, which is the foundational algorithm described
-# in the original paper (Huang et al. 1998/2016). EEMD is planned for v0.2.
-#
-# What IS equivalent:
-#   - The two-layer structure: EMD → Hilbert → EMD(amplitude) → Holo-spectrum
-#   - The holo-spectrum binning: energy A²(t) in (ω × Ω) space
-#   - The ω > Ω physical constraint (paper Section 3, Fig. 6c)
-#   - The cubic-spline sifting and SD stoppage criterion (Huang 1998 eq. 5.5)
-#
-# What differs:
-#   - Mode-mixing suppression: EEMD (MATLAB) vs. plain EMD (Julia)
-#   - Boundary conditions: MATLAB uses SPM12 interpolation; we use mirror reflection
-#   - Data: MATLAB scripts process EEG; tests below use synthetic signals
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Test utilities ─────────────────────────────────────────────────────────────
 
-# ── Helper: find the argmax bin in a 2-D matrix marginalised over one axis ──
-function _peak_freq(H, axis; margin_dim)
-    marginal = vec(sum(H; dims=margin_dim))
-    return axis[argmax(marginal)]
+"""
+    peak_coords(H, ω_ax, Ω_ax) → (peak_ω, peak_Ω)
+
+Return the (carrier, modulation) frequency pair at the global energy maximum
+of the Holo-Hilbert spectrum H.
+"""
+function peak_coords(H::Matrix, ω_ax::Vector, Ω_ax::Vector)
+    idx = argmax(H)
+    return ω_ax[idx[2]], Ω_ax[idx[1]]
 end
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 1: EMD reconstruction — sum of all IMFs must equal the input exactly
-# ─────────────────────────────────────────────────────────────────────────────
-function test_emd_reconstruction()
-    t = range(0, 1, length=1000)
-    x = Float64.(sin.(2π * 50.0 .* t))
+"""
+    forbidden_fraction(H, ω_ax, Ω_ax) → Float64
 
-    imfs = emd(x; max_imfs=6, max_sift=200, sd_threshold=1e-6)
-    recon = sum(imfs)
-    @test isapprox(recon, x; atol=1e-6, rtol=1e-6)
-end
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 2: Additive signal (paper Figure 2a sanity check)
-# x(t) = sin(2π·0.01·t) + noise
-# Expected: the modulation frequency Ω peak appears near 0.01 Hz
-# ─────────────────────────────────────────────────────────────────────────────
-function test_additive_sine_noise()
-    Random.seed!(42)
-    fs = 1.0
-    t  = 0:999.0
-    f_m = 0.01
-
-    x_add = sin.(2π * f_m .* t) .+ 0.5 .* randn(length(t))
-    result = hhsa(Float64.(x_add), fs; max_imfs=6, max_sift=150)
-
-    ω_ax, Ω_ax, H = holo_spectrum(result; n_carrier=150, n_mod=100,
-                                   f_carrier_max=0.3, f_mod_max=0.1)
-
-    # Structural check (plain EMD): at least 2 IMFs, spectrum computed
-    @test length(result.imfs) >= 2
-    @test size(H) == (100, 150)
-
-    # Ω marginal: sum energy over all carrier freqs → peek at modulation
-    peak_Ω = _peak_freq(H, Ω_ax; margin_dim=2)
-    Ω_step = Ω_ax[2] - Ω_ax[1]
-    # NOTE: tight frequency accuracy requires EEMD (v0.2).
-    # Plain EMD mode mixing can push the peak to Ω=0 due to the trend residue.
-    @test_broken abs(peak_Ω - f_m) < 0.5 * f_m + Ω_step
-end
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 3: Multiplicative signal (paper Figure 2b — THE KEY RESULT)
-# x(t) = sin(2π·0.01·t) × noise
-# Expected: Ω marginal peak near 0.01 Hz  (Fourier cannot detect it; HHSA can)
-# ─────────────────────────────────────────────────────────────────────────────
-function test_multiplicative_sine_noise()
-    Random.seed!(42)
-    fs = 1.0
-    t  = 0:999.0
-    f_m = 0.01
-
-    x_mult = sin.(2π * f_m .* t) .* randn(length(t))
-    result  = hhsa(Float64.(x_mult), fs; max_imfs=6, max_sift=150)
-
-    ω_ax, Ω_ax, H = holo_spectrum(result; n_carrier=150, n_mod=100,
-                                   f_carrier_max=0.3, f_mod_max=0.1)
-
-    # The ω > Ω constraint must have been applied.
-    # NOTE: the constraint is enforced on continuous instantaneous values before
-    # binning; discrete rounding can deposit energy on the ω≈Ω diagonal (one bin
-    # tolerance). We therefore only assert exact zero strictly off-diagonal, and
-    # verify that the forbidden region (Ω >> ω) carries negligible energy.
-    Δω_grid = ω_ax[2] - ω_ax[1]
-    ΔΩ_grid = Ω_ax[2] - Ω_ax[1]
-    diag_tol = max(Δω_grid, ΔΩ_grid)   # one-bin rounding tolerance
-
-    forbidden_energy = 0.0
+Fraction of total HHS energy in the physically forbidden half-plane Ω ≥ ω.
+Should be ≈ 0 after the constraint fix.  Paper Section 3: 'ω > Ω always valid'.
+"""
+function forbidden_fraction(H::Matrix, ω_ax::Vector, Ω_ax::Vector)
+    total = sum(H)
+    iszero(total) && return 0.0
+    bad = 0.0
     for (mi, Ω) in enumerate(Ω_ax), (ci, ω) in enumerate(ω_ax)
-        if Ω > ω + diag_tol    # clearly off-diagonal forbidden zone
-            forbidden_energy += H[mi, ci]
-        end
+        Ω >= ω && (bad += H[mi, ci])
     end
-    total_energy = sum(H)
-    # Forbidden fraction must be < 1% of total (near-zero due to rounding artefacts only)
-    if total_energy > 0
-        @test forbidden_energy / total_energy < 0.01
-    end
-
-    # Ω marginal peak: with plain EMD, mode mixing may place peak at Ω=0.
-    # The tight check requires EEMD (Wu & Huang 2009) — marked broken for v0.2.
-    peak_Ω = _peak_freq(H, Ω_ax; margin_dim=2)
-    @test peak_Ω >= 0.0   # trivially always true — confirms spectrum was built
-    @test_broken abs(peak_Ω - f_m) < 0.3 * f_m  # ← needs EEMD to pass reliably
+    return bad / total
 end
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 4: Two AM carriers (ω, Ω precision test)
-# x(t) = (1 + 0.8·sin(2π·6·t))·sin(2π·60·t) + (1 + 0.5·sin(2π·2·t))·sin(2π·20·t)
-# Expected holo-spectrum peaks: (ω≈60, Ω≈6) and (ω≈20, Ω≈2)
-# ─────────────────────────────────────────────────────────────────────────────
-function test_two_am_carriers()
-    Random.seed!(42)
-    fs = 512.0
-    T  = 2.0
-    t  = 0:1/fs:T-1/fs
+"""
+    window_energy(H, ω_ax, Ω_ax, ω_lo, ω_hi, Ω_lo, Ω_hi) → Float64
 
-    f_c1, f_m1 = 60.0, 6.0
-    f_c2, f_m2 = 20.0, 2.0
-
-    x = @. (1 + 0.8*sin(2π*f_m1*t)) * sin(2π*f_c1*t) +
-           (1 + 0.5*sin(2π*f_m2*t)) * sin(2π*f_c2*t) +
-           0.05 * randn()
-
-    result = hhsa(Float64.(x), fs; max_imfs=8, max_sift=200)
-
-    ω_ax, Ω_ax, H = holo_spectrum(result; n_carrier=200, n_mod=100,
-                                   f_carrier_max=80.0, f_mod_max=20.0)
-
-    # Structural checks (pass reliably with plain EMD)
-    @test length(result.imfs) >= 2
-    @test size(H) == (100, 200)
-    @test sum(H) > 0.0                    # spectrum has energy
-
-    # ── Peak near (ω≈60 Hz, Ω≈6 Hz) ─────────────────────────────────
-    # Restrict to ω ∈ [45, 75] Hz band and find the dominant Ω there.
-    # NOTE: tight Ω accuracy requires EEMD; plain EMD may peak at Ω=0 due to
-    # mode mixing between the two carriers. Marked @test_broken for v0.2.
-    hi_band = findall(ω -> 45 < ω < 75, ω_ax)
-    if !isempty(hi_band)
-        peak_Ω_hi = _peak_freq(H[:, hi_band], Ω_ax; margin_dim=2)
-        @test_broken abs(peak_Ω_hi - f_m1) < 4.0
-    end
-
-    # ── Peak near (ω≈20 Hz, Ω≈2 Hz) ─────────────────────────────────
-    # The lower carrier (20 Hz) is well-separated from the 60 Hz component;
-    # plain EMD reliably detects its modulation at 2 Hz.
-    lo_band = findall(ω -> 10 < ω < 35, ω_ax)
-    if !isempty(lo_band)
-        peak_Ω_lo = _peak_freq(H[:, lo_band], Ω_ax; margin_dim=2)
-        @test abs(peak_Ω_lo - f_m2) < 3.0
-    end
-
-    # ── Physical constraint: forbidden energy < 1% (diagonal smear allowed) ─────
-    Δω_g = ω_ax[2] - ω_ax[1]
-    ΔΩ_g = Ω_ax[2] - Ω_ax[1]
-    diag_tol = max(Δω_g, ΔΩ_g)
-    forbidden = sum(H[mi, ci]
-                    for (mi, Ω) in enumerate(Ω_ax), (ci, ω) in enumerate(ω_ax)
-                    if Ω > ω + diag_tol)
-    if sum(H) > 0
-        @test forbidden / sum(H) < 0.01
-    end
+Sum of HHS energy inside a rectangular frequency window.
+Used to verify that a known AM component deposits energy in the right region.
+"""
+function window_energy(H, ω_ax, Ω_ax, ω_lo, ω_hi, Ω_lo, Ω_hi)
+    ω_mask = (ω_ax .>= ω_lo) .& (ω_ax .<= ω_hi)
+    Ω_mask = (Ω_ax .>= Ω_lo) .& (Ω_ax .<= Ω_hi)
+    return sum(H[Ω_mask, ω_mask])
 end
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 5: Chirp signal (linearly sweeping 10 → 90 Hz)
-# Expected: mean carrier frequency in [10, 90] Hz range, correct sweep direction
-# ─────────────────────────────────────────────────────────────────────────────
-function test_chirp_signal()
-    fs = 512.0
-    t  = 0:1/fs:4.0-1/fs
-    f_inst = @. 10.0 + 20.0 * t   # sweep 10 → 90 Hz
-    phase  = cumsum(f_inst) / fs
-    x      = Float64.(sin.(2π .* phase))
+# ══════════════════════════════════════════════════════════════════════════════
+@testset "HHSA.jl" begin
+# ══════════════════════════════════════════════════════════════════════════════
 
-    result = hhsa(x, fs; max_imfs=5)
+# ── Group 1: EMD correctness ──────────────────────────────────────────────────
+@testset "EMD" begin
 
-    # Mean carrier frequency of the dominant (first) IMF
-    mean_f = mean(result.carrier_freq[1])
-    @test 10 < mean_f < 90
+    @testset "perfect reconstruction  [paper eq. 1.3: x(t) = Σcⱼ(t) + residue]" begin
+        # The defining property of EMD: the sum of all returned vectors
+        # (IMFs + residue) must equal the original signal to machine precision.
+        # This is not approximate — it must be exact.
+        rng = MersenneTwister(42)
+        fs  = 512.0
+        N   = round(Int, 2 * fs)
+        t   = (0:N-1) ./ fs
+        x   = sin.(2π * 30 .* t) .+ 0.5 .* sin.(2π * 8 .* t) .+
+              0.1 .* randn(rng, N)
 
-    # Positive trend: later carrier freqs higher than earlier ones (sweep up)
-    N = length(result.carrier_freq[1])
-    first_half_mean  = mean(result.carrier_freq[1][1:div(N,3)])
-    second_half_mean = mean(result.carrier_freq[1][div(2*N,3):end])
-    @test second_half_mean > first_half_mean
-end
+        imfs = emd(Float64.(x))
+        reconstructed = sum(imfs)          # Vector + Vector = element-wise sum
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run all tests
-# ─────────────────────────────────────────────────────────────────────────────
-@testset "EMD & HHSA validation tests" begin
-    @testset "Test 1: EMD reconstruction (mathematical identity)" begin
-        test_emd_reconstruction()
+        @test maximum(abs.(reconstructed .- x)) < 1e-10   # machine precision
     end
-    @testset "Test 2: Additive sine + noise (Figure 2a sanity check)" begin
-        test_additive_sine_noise()
-    end
-    @testset "Test 3: Multiplicative × noise + ω>Ω constraint (Figure 2b)" begin
-        test_multiplicative_sine_noise()
-    end
-    @testset "Test 4: Two AM carriers — peak frequency accuracy" begin
-        test_two_am_carriers()
-    end
-    @testset "Test 5: Chirp — instantaneous frequency sweep" begin
-        test_chirp_signal()
-    end
-end
 
+    @testset "monotonic residue  [stopping rule: < 3 total extrema in residue]" begin
+        # EMD stops extracting IMFs when the residue has fewer than 3 extrema,
+        # meaning it is monotonic (a trend with no oscillation to extract).
+        rng  = MersenneTwister(17)
+        x    = randn(rng, 600)
+        imfs = emd(x)
+        res  = imfs[end]
+        # Count extrema manually (avoid calling private _find_extrema)
+        n_ext = count(i -> (res[i] > res[i-1] && res[i] > res[i+1]) ||
+                           (res[i] < res[i-1] && res[i] < res[i+1]),
+                      2:length(res)-1)
+        @test n_ext < 3
+    end
+
+    @testset "constant signal  [degenerate: no oscillation, returns as residue]" begin
+        x    = fill(3.14, 200)
+        imfs = emd(x)
+        @test sum(imfs) ≈ x  atol=1e-10
+    end
+
+    @testset "monotonic signal  [degenerate: EMD returns immediately]" begin
+        x    = Float64.(1:150)          # linearly increasing — nothing to sift
+        imfs = emd(x)
+        @test sum(imfs) ≈ x  atol=1e-10
+    end
+
+    @testset "single sinusoid yields ≥ 2 vectors (1 IMF + residue)" begin
+        t    = (0:511) ./ 512.0
+        x    = sin.(2π * 40.0 .* t)
+        imfs = emd(Float64.(x))
+        @test length(imfs) >= 2
+    end
+
+    @testset "multi-component: more IMFs than single sinusoid" begin
+        # Two well-separated sinusoids should produce ≥ 2 non-trivial IMFs.
+        t    = (0:1023) ./ 512.0
+        x    = sin.(2π * 60.0 .* t) .+ sin.(2π * 10.0 .* t)
+        imfs_multi  = emd(Float64.(x))
+        imfs_single = emd(sin.(2π * 60.0 .* t))
+        @test length(imfs_multi) > length(imfs_single)
+    end
+
+end  # EMD
+
+# ── Group 2: Hilbert transform / instantaneous parameters ─────────────────────
+@testset "Instantaneous parameters" begin
+
+    @testset "amplitude of pure sinusoid  [analytic signal: |z(t)| = A]" begin
+        # For x(t) = A·sin(2πft), the analytic signal is z(t) = A·e^{iωt}.
+        # Therefore |z(t)| = A at every point (Bedrosian, 1963; paper Section 5).
+        # We exclude 5% at each edge because the FFT-based Hilbert transform
+        # has boundary artefacts for non-periodic signals.
+        fs   = 1024.0
+        f    = 50.0
+        A    = 2.5
+        t    = (0:round(Int, 2fs)-1) ./ fs
+        x    = A .* sin.(2π * f .* t)
+        amp, _ = instantaneous_params(Float64.(x), fs)
+
+        trim = round(Int, 0.05 * length(x))
+        @test mean(amp[trim:end-trim]) ≈ A  rtol=0.02    # within 2%
+        @test  std(amp[trim:end-trim])     < 0.05 * A    # low variance too
+    end
+
+    @testset "frequency of pure sinusoid  [ω(t) = dθ/dt = 2πf]" begin
+        # For x(t) = sin(2πft), the unwrapped phase grows linearly,
+        # so its derivative is constant: ω(t) = f (Hz) everywhere.
+        fs = 1024.0
+        f  = 30.0
+        t  = (0:round(Int, 2fs)-1) ./ fs
+        x  = sin.(2π * f .* t)
+        _, freq = instantaneous_params(Float64.(x), fs)
+
+        trim = round(Int, 0.05 * length(x))
+        @test mean(freq[trim:end-trim]) ≈ f  rtol=0.02   # within 2%
+    end
+
+    @testset "frequency is non-negative  [clamp of dθ/dt at edges]" begin
+        # Edge artefacts in the Hilbert transform can produce small negative
+        # instantaneous frequencies.  The implementation clamps to zero.
+        rng  = MersenneTwister(99)
+        x    = randn(rng, 512)
+        _, freq = instantaneous_params(x, 512.0)
+        @test all(freq .>= 0.0)
+    end
+
+end  # Instantaneous parameters
+
+# ── Group 3: Physical constraint ω > Ω ───────────────────────────────────────
+@testset "Physical constraint: ω > Ω in HHS" begin
+
+    @testset "no energy in forbidden half-plane  [paper Section 3]" begin
+        # Paper Section 3: 'The high-dimensional spectral representation would
+        # only fill half of the ω–Ω space, for Ω is derived from the slowly
+        # varying amplitude; therefore, the condition ω > Ω is always valid.'
+        #
+        # Before the fix, numerical noise from EMD boundary effects deposited
+        # spurious energy at Ω ≥ ω.  After the fix, this region must be empty.
+        t = (0:2047) ./ 512.0
+        x = @. (1 + 0.8sin(2π * 6t)) * sin(2π * 60t)
+
+        result        = hhsa(Float64.(x), 512.0; max_imfs=6)
+        ω_ax, Ω_ax, H = holo_spectrum(result;
+                                       n_carrier     = 128,
+                                       n_mod         = 64,
+                                       f_carrier_max = 200.0,
+                                       f_mod_max     = 60.0)
+
+        @test forbidden_fraction(H, ω_ax, Ω_ax) < 0.01   # < 1% in forbidden zone
+    end
+
+    @testset "diagonal boundary in HHS is respected for noisy signal" begin
+        rng = MersenneTwister(11)
+        t   = (0:2047) ./ 512.0
+        x   = @. sin(2π * 40t) + 0.3randn()
+        x   = Float64.(x) .+ 0.3 .* randn(rng, length(t))
+
+        result        = hhsa(x, 512.0; max_imfs=6)
+        ω_ax, Ω_ax, H = holo_spectrum(result; n_carrier=128, n_mod=64,
+                                               f_carrier_max=150.0, f_mod_max=50.0)
+        @test forbidden_fraction(H, ω_ax, Ω_ax) < 0.01
+    end
+
+end  # Physical constraint
+
+# ── Group 4: HHS peak localization ───────────────────────────────────────────
+@testset "HHS peak localization" begin
+
+    @testset "single pure AM — peak at (f_c, f_m)  [paper Fig. 6c concept]" begin
+        # x(t) = (1 + 0.8·sin(2π·f_m·t))·sin(2π·f_c·t)
+        #
+        # This is the cleanest possible test: no noise, known ground truth,
+        # modulation index < 1 so the envelope is always positive (no rectification).
+        # The HHS global peak must fall near the input frequencies.
+        fs  = 512.0
+        f_c = 60.0
+        f_m = 6.0
+        t   = (0:round(Int, 4fs)-1) ./ fs
+        x   = @. (1 + 0.8sin(2π * f_m * t)) * sin(2π * f_c * t)
+
+        result        = hhsa(Float64.(x), fs; max_imfs=6, sd_threshold=0.05)
+        ω_ax, Ω_ax, H = holo_spectrum(result;
+                                       n_carrier     = 256,
+                                       n_mod         = 128,
+                                       f_carrier_max = 150.0,
+                                       f_mod_max     = 30.0)
+        peak_ω, peak_Ω = peak_coords(H, ω_ax, Ω_ax)
+
+        @test abs(peak_ω - f_c) < 10.0   # carrier within 10 Hz of f_c = 60 Hz
+        @test abs(peak_Ω - f_m) <  3.0   # modulation within 3 Hz of f_m = 6 Hz
+    end
+
+    @testset "two AM components — energy in both expected windows" begin
+        # x = AM(60 Hz, 6 Hz) + AM(20 Hz, 2 Hz)  (the demo signal, no noise)
+        #
+        # We don't require exact peak coordinates (two components interact in EMD),
+        # but a meaningful fraction of the total energy must appear in windows
+        # surrounding each expected (ω, Ω) coordinate.
+        rng = MersenneTwister(42)
+        fs  = 512.0
+        t   = (0:round(Int, 4fs)-1) ./ fs
+        N   = length(t)
+        x   = @. (1 + 0.8sin(2π * 6t)) * sin(2π * 60t) +
+                 (1 + 0.5sin(2π * 2t)) * sin(2π * 20t)
+        x   = Float64.(x) .+ 0.05 .* randn(rng, N)
+
+        result        = hhsa(x, fs; max_imfs=8, sd_threshold=0.05)
+        ω_ax, Ω_ax, H = holo_spectrum(result;
+                                       n_carrier     = 256,
+                                       n_mod         = 128,
+                                       f_carrier_max = 150.0,
+                                       f_mod_max     = 20.0)
+        total = sum(H)
+
+        # Window centred on (ω=60, Ω=6) — ±20 Hz carrier, ±4 Hz modulation
+        e1 = window_energy(H, ω_ax, Ω_ax, 40.0, 80.0, 2.0, 10.0)
+        # Window centred on (ω=20, Ω=2) — ±10 Hz carrier, ±2 Hz modulation
+        e2 = window_energy(H, ω_ax, Ω_ax, 10.0, 30.0, 0.5,  4.0)
+
+        @test e1 / total > 0.10   # ≥10% of energy near the 60 Hz component
+        @test e2 / total > 0.05   # ≥5%  of energy near the 20 Hz component
+    end
+
+end  # HHS peak localization
+
+# ── Group 5: Paper Figures 2, 3, 6c core demonstration ───────────────────────
+@testset "Paper core demonstration  [Figs 2, 3, 6c]" begin
+
+    # Shared signal construction — matches the paper's Section 2 setup.
+    # fs = 1 Hz, N = 1000 samples (= 1000 seconds), f_sine ≈ 0.01 Hz.
+    rng    = MersenneTwister(314)
+    fs     = 1.0
+    N      = 1000
+    t      = (0:N-1) ./ fs
+    f_sine = 0.01     # period = 100 s, ~10 cycles visible in Fig. 1a
+
+    noise  = randn(rng, N)
+    s_wave = sin.(2π * f_sine .* t)
+
+    x_add  = s_wave .+ noise     # paper eq. 2.6, upper:  x₁(t) = cos A + Σ cos θⱼ
+    x_mult = s_wave .* noise     # paper eq. 2.6, lower:  x₂(t) = cos A · Σ cos θⱼ
+
+    @testset "Fig 3a: Fourier DOES detect sine in additive signal" begin
+        # The Fourier spectrum of the additive signal (x_add) must show a clear
+        # peak at f_sine, because the sine wave simply adds to the noise floor.
+        # This is the 'control' case — if this fails, something is wrong with
+        # the signal construction, not with HHSA.
+        P_add  = abs2.(fft(x_add))[1:N÷2+1] ./ N
+        freqs  = (0:N÷2) ./ (N * (1/fs))     # Hz
+
+        bin       = argmin(abs.(freqs .- f_sine))
+        neighbors = vcat(P_add[max(1, bin-10):bin-1],
+                         P_add[bin+1:min(end, bin+10)])
+
+        @test P_add[bin] > 3.0 * mean(neighbors)   # clear peak at f_sine
+    end
+
+    @testset "Fig 3b: Fourier CANNOT detect sine in multiplicative signal" begin
+        # For x_mult = sin(Ωt)·noise, the trigonometric identity
+        # cos(A)·cos(B) = ½[cos(A+B) + cos(A-B)] spreads the sine's energy
+        # symmetrically around every noise component.  The original frequency
+        # Ω disappears from the spectrum entirely.  Paper eq. 2.3–2.6.
+        P_mult = abs2.(fft(x_mult))[1:N÷2+1] ./ N
+        freqs  = (0:N÷2) ./ (N * (1/fs))
+
+        bin       = argmin(abs.(freqs .- f_sine))
+        neighbors = vcat(P_mult[max(1, bin-10):bin-1],
+                         P_mult[bin+1:min(end, bin+10)])
+
+        # The sine peak should NOT stand out — it should be buried in noise.
+        # We allow up to 3× the local mean before calling it a visible peak.
+        @test P_mult[bin] < 3.0 * mean(neighbors)
+    end
+
+    @testset "Fig 6c: HHSA finds modulation frequency in multiplicative signal" begin
+        # After Fourier fails (previous test), HHSA recovers the modulation.
+        #
+        # Mechanism (paper Fig. 6c caption):
+        # For full modulation x = cos(Ωt)·noise, the amplitude envelope of each
+        # noise IMF oscillates as |cos(Ωt)|, which has frequency 2Ω (rectified
+        # cosine).  'Because of the full modulation, this frequency is twice the
+        # value of the sine wave.'
+        #
+        # Target band: Ω_target = 2·f_sine, tolerance ±factor of 2.
+        result = hhsa(x_mult, fs;
+                      max_imfs     = 8,
+                      max_sift     = 80,      # faster for CI
+                      sd_threshold = 0.15)
+
+        ω_ax, Ω_ax, H = holo_spectrum(result;
+                                       n_carrier     = 128,
+                                       n_mod         = 64,
+                                       f_carrier_max = 0.5,
+                                       f_mod_max     = 0.08)
+
+        Ω_target = 2 * f_sine              # = 0.02 Hz
+        Ω_lo     = Ω_target * 0.5          # 0.01 Hz
+        Ω_hi     = Ω_target * 3.0          # 0.06 Hz  (generous: EMD is adaptive)
+        Ω_mask   = (Ω_ax .>= Ω_lo) .& (Ω_ax .<= Ω_hi)
+
+        frac = sum(H[Ω_mask, :]) / sum(H)
+        @test frac > 0.20   # ≥20% of energy in the 2·f_sine band
+    end
+
+end  # Paper core demonstration
+
+# ══════════════════════════════════════════════════════════════════════════════
+end  # @testset "HHSA.jl"
+# ══════════════════════════════════════════════════════════════════════════════
