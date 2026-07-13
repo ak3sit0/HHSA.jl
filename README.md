@@ -195,16 +195,8 @@ Compute the binned 2-D energy matrix directly (without plotting).
   *On empirical mode decomposition and its algorithms.* 
   IEEE-EURASIP Workshop on Nonlinear Signal and Image Processing (NSIP-03).
 
-## License
-
-MIT License. See [LICENSE](LICENSE).
-
-## Contributing & Future Work
-
-- **EEMD (Ensemble EMD)** — planned for v0.2 (noise-assisted decomposition to reduce mode mixing).
-- **Makie.jl backend** — optional interactive 3-D holo-spectrum visualization.
-- **Interpolations.jl** — optional replacement for hand-rolled cubic splines (reduces code, negligible performance gain).
-- **Porting your own data?** See `examples/demo.jl` for the workflow. Open an issue if you encounter edge cases.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Julia Version](https://img.shields.io/badge/Julia-%E2%89%A5%201.6-purple.svg)](https://julialang.org/)
 
 ## Contact
 
