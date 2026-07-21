@@ -25,7 +25,7 @@ Random.seed!(42)
 # This is still multiplicative (product), but with a faster modulation
 # to make it detectable by HHSA. The paper's example of 0.01 Hz is a limit case.
 fs = 100.0         # Higher sampling rate for better time-frequency resolution
-T = 100.0          # 100 second signal
+T = 500.0          # 500 second signal (250 cycles of modulation)
 t = 0:1/fs:(T - 1/fs)
 N = length(t)
 
@@ -35,7 +35,7 @@ f_mod = 0.5             # Modulation frequency: 0.5 Hz (more detectable than 0.0
 # Generate multiplicative signal: amplitude-modulated noise
 # This mimics a noisy signal whose amplitude varies sinusoidally
 Random.seed!(42)        # Ensure reproducibility
-envelope = 1.0 .+ 0.8 .* sin.(2π * f_mod .* t)  # Amplitude varies from 0.2 to 1.8
+envelope = 1.0 .+ 1.5 .* sin.(2π * f_mod .* t)  # Amplitude varies from -0.5 to 2.5 (stronger modulation)
 x_mult = envelope .* randn(N)
 
 println("Multiplicative signal: [1 + 0.8·sin(2π·$(f_mod)·t)] × noise")
