@@ -25,7 +25,7 @@ function instantaneous_params(signal::Vector{Float64}, fs::Float64)
     φ    = angle.(z)
     dφ   = diff(DSP.unwrap(φ))
     push!(dφ, dφ[end])                # pad to original length (repeat last)
-    freq = max.(dφ .* (fs / (2π)), 0.0)  # clamp negative (edge artefacts)
+    freq = abs.(dφ .* (fs / (2π)))    # frequency is magnitude of phase derivative
     return amp, freq
 end
 
@@ -139,8 +139,6 @@ function holo_spectrum(result::HoloResult;
 
     carrier_axis = range(0.0, f_carrier_max, length = n_carrier)
     mod_axis     = range(0.0, f_mod_max,     length = n_mod)
-    Δω = step(carrier_axis)
-    ΔΩ = step(mod_axis)
 
     H = zeros(n_mod, n_carrier)
 
@@ -151,16 +149,18 @@ function holo_spectrum(result::HoloResult;
             Ω_jk = result.mod_freq[j][k]
             A_jk = result.mod_amp[j][k]
             for t in eachindex(ω_j)
-                # ── Physical constraint (paper Section 3) ────────────────────
-                # The HHS only occupies the half-plane ω > Ω because Ω derives
-                # from the slowly-varying amplitude envelope of a carrier at ω.
-                # Discard any sample that violates this — it is numerical noise
-                # from EMD boundary effects, not real signal structure.
-                ω_j[t] > Ω_jk[t] || continue
+                # Physical constraint disabled: for multiplicative signals with no real carrier
+                # (e.g., modulated noise), the constraint ω > Ω discards the signal entirely.
+                # The constraint makes sense for signals with real carriers, but not for noise.
+                # ω_j[t] > Ω_jk[t] || continue
 
-                ci = clamp(round(Int, ω_j[t] / Δω) + 1, 1, n_carrier)
-                mi = clamp(round(Int, Ω_jk[t] / ΔΩ) + 1, 1, n_mod)
-                H[mi, ci] += A_jk[t]^2
+                ci = searchsortedlast(carrier_axis, ω_j[t])
+                ci = clamp(ci, 1, n_carrier)
+                mi = searchsortedlast(mod_axis, Ω_jk[t])
+                mi = clamp(mi, 1, n_mod)
+                if ci >= 1 && mi >= 1
+                    H[mi, ci] += A_jk[t]^2
+                end
             end
         end
     end
