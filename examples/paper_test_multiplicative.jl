@@ -25,17 +25,17 @@ Random.seed!(42)
 # This is still multiplicative (product), but with a faster modulation
 # to make it detectable by HHSA. The paper's example of 0.01 Hz is a limit case.
 fs = 100.0         # Higher sampling rate for better time-frequency resolution
-T = 500.0          # 500 second signal (250 cycles of modulation)
+T = 300.0          # 300 second signal (optimal from parameter search)
 t = 0:1/fs:(T - 1/fs)
 N = length(t)
 
 f_carrier_base = 0.0    # Base level (multiplicative modulation has no explicit carrier)
-f_mod = 0.5             # Modulation frequency: 0.5 Hz (more detectable than 0.01 Hz)
+f_mod = 0.3             # Modulation frequency: 0.3 Hz (optimal from parameter search)
 
 # Generate multiplicative signal: amplitude-modulated noise
 # This mimics a noisy signal whose amplitude varies sinusoidally
 Random.seed!(42)        # Ensure reproducibility
-envelope = 1.0 .+ 1.5 .* sin.(2π * f_mod .* t)  # Amplitude varies from -0.5 to 2.5 (stronger modulation)
+envelope = 1.0 .+ 1.0 .* sin.(2π * f_mod .* t)  # Amplitude varies from 0 to 2 (optimal modulation strength)
 x_mult = envelope .* randn(N)
 
 println("Multiplicative signal: [1 + 0.8·sin(2π·$(f_mod)·t)] × noise")
@@ -69,7 +69,7 @@ p2 = plot(f_axis_fft[1:100], 10 .* log10.(fft_x[1:100] .+ eps());
 # Panel 3: HHSA — holo-spectrum reveals the modulation
 # ─────────────────────────────────────────────────────────────────────────────
 println("\nRunning HHSA (2-layer EMD)…")
-@time result = hhsa(x_mult, fs; max_imfs=10, max_sift=200, sd_threshold=0.1)
+@time result = hhsa(x_mult, fs; max_imfs=15, max_sift=300, sd_threshold=0.05)
 
 # Compute holo-spectrum
 ω_ax, Ω_ax, H = holo_spectrum(result; n_carrier=150, n_mod=100,
